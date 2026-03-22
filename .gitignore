@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+
+# training artifacts
+checkpoints/*
+!checkpoints/
+!checkpoints/best_model.pt
+reports/
+
+# dataset folders
+data/processed/
+data/raw/
+dataset/
+
+# local cache and runtime logs
+.cache/
+*.log

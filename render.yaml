@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: food-spoilage-detector
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
