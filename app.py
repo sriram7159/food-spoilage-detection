@@ -434,7 +434,7 @@ if report_data and "metrics" in report_data:
             unsafe_allow_html=True,
         )
 else:
-    st.info("Evaluation metrics not found. Uploading and prediction still work, but analytics need reports/evaluation_report.json.")
+    pass
 
 st.info("Upload an image by clicking Browse files in the box below, or drag and drop a file.")
 uploaded = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "webp", "bmp"])
