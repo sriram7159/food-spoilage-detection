@@ -6,7 +6,7 @@ import io
 import streamlit as st
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageStat, ImageFilter
 from src.model_utils import get_transforms, load_checkpoint
 
 
@@ -91,22 +91,69 @@ def traffic_signal(score: int, c_level: str) -> tuple[str, str]:
     return "Red", "Throw"
 
 
-def discount_suggestion(score: int, c_level: str) -> int:
-    if c_level == "Low confidence":
-        return 0
-    if score <= 25:
-        return 0
-    if score <= 60:
-        return 15
-    return 40
-
-
 def estimate_saved_value(score: int, avg_item_value: float) -> float:
     if score > 60:
         return avg_item_value * 0.70
     if score > 25:
         return avg_item_value * 0.25
     return 0.0
+
+
+def estimate_shelf_life(score: int, c_level: str, label: str) -> str:
+    if c_level == "Low confidence":
+        return "Check within 12h"
+
+    if is_spoilage_label(label):
+        if score >= 80:
+            return "Discard now"
+        if score >= 60:
+            return "Use within 6h"
+        return "Use within 12h"
+
+    if score <= 15:
+        return "Best within 48h"
+    if score <= 30:
+        return "Best within 24h"
+    return "Best within 12h"
+
+
+def explain_prediction(image: Image.Image, label: str, c_level: str, risk_score: int) -> list[str]:
+    # Lightweight visual cues to make output easier to trust for non-technical users.
+    small = image.resize((224, 224))
+    gray = small.convert("L")
+    hsv = small.convert("HSV")
+
+    brightness = ImageStat.Stat(gray).mean[0]
+    saturation = ImageStat.Stat(hsv.getchannel("S")).mean[0]
+    edge_strength = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).mean[0]
+
+    reasons: list[str] = []
+
+    if c_level == "Low confidence":
+        reasons.append("Low confidence detected; manual quality check is recommended.")
+    if brightness < 65:
+        reasons.append("Image appears dark, which can reduce model certainty.")
+    elif brightness > 215:
+        reasons.append("Image appears over-bright; highlights may hide surface details.")
+
+    if is_spoilage_label(label):
+        if edge_strength > 35:
+            reasons.append("Surface irregularity pattern is consistent with spoilage.")
+        if saturation < 80:
+            reasons.append("Low color vividness indicates possible aging/decay.")
+    else:
+        if saturation >= 95:
+            reasons.append("Color vividness is closer to fresh produce patterns.")
+        if edge_strength < 34:
+            reasons.append("Smoother texture pattern matches fresher samples.")
+
+    if risk_score >= 70:
+        reasons.append("High risk score suggests immediate handling action.")
+
+    if not reasons:
+        reasons.append("Visual signals are within normal range for this prediction.")
+
+    return reasons[:3]
 
 
 def predict_image(image: Image.Image, model, preprocess, device, class_names: list[str], threshold: float):
@@ -122,7 +169,8 @@ def predict_image(image: Image.Image, model, preprocess, device, class_names: li
     risk_level = risk_band(risk_score)
     action_text = action_recommendation(label, conf_val, c_level)
     signal_color, signal_text = traffic_signal(risk_score, c_level)
-    discount_pct = discount_suggestion(risk_score, c_level)
+    shelf_life = estimate_shelf_life(risk_score, c_level, label)
+    reasons = explain_prediction(image, label, c_level, risk_score)
 
     return {
         "label": label,
@@ -133,7 +181,8 @@ def predict_image(image: Image.Image, model, preprocess, device, class_names: li
         "action": action_text,
         "signal_color": signal_color,
         "signal_text": signal_text,
-        "discount_pct": discount_pct,
+        "shelf_life": shelf_life,
+        "reasons": reasons,
         "probs": probs,
     }
 
@@ -336,9 +385,87 @@ h1, h2, h3, h4, .subhead {
     background: linear-gradient(165deg, #f6fcfb 0%, #ffffff 100%);
     border: 1px solid var(--line);
     border-radius: 14px;
-    padding: 0.82rem 0.9rem;
+    padding: 0.9rem 0.95rem;
     margin-bottom: 0.5rem;
     box-shadow: 0 8px 18px rgba(2, 47, 43, 0.08);
+}
+
+.pred-card.fresh {
+    border-color: #86efac;
+    background: linear-gradient(165deg, #ecfdf3 0%, #ffffff 100%);
+}
+
+.pred-card.spoiled {
+    border-color: #fca5a5;
+    background: linear-gradient(165deg, #fff4f4 0%, #ffffff 100%);
+}
+
+.pred-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.35rem;
+}
+
+.pred-label {
+    margin: 0;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+    color: var(--muted);
+}
+
+.pred-pills {
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+}
+
+.pill {
+    border-radius: 999px;
+    padding: 0.17rem 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    border: 1px solid transparent;
+}
+
+.pill.state-fresh {
+    color: #166534;
+    background: #ecfdf3;
+    border-color: #86efac;
+}
+
+.pill.state-spoiled {
+    color: #991b1b;
+    background: #fef2f2;
+    border-color: #fca5a5;
+}
+
+.pill.conf-high {
+    color: #0f5132;
+    background: #ddfbe6;
+    border-color: #76dd9f;
+}
+
+.pill.conf-moderate {
+    color: #92400e;
+    background: #fffbeb;
+    border-color: #fcd34d;
+}
+
+.pill.conf-low {
+    color: #7f1d1d;
+    background: #fef2f2;
+    border-color: #fca5a5;
+}
+
+.pred-highlight {
+    margin: 0.28rem 0 0 0;
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: var(--muted);
 }
 
 .pred-title {
@@ -421,6 +548,30 @@ h1, h2, h3, h4, .subhead {
     font-weight: 700;
 }
 
+.life-chip {
+    display: inline-block;
+    margin-top: 0.38rem;
+    border-radius: 999px;
+    padding: 0.16rem 0.52rem;
+    font-size: 0.74rem;
+    font-weight: 700;
+    background: #eefaf6;
+    color: #0b5f5a;
+    border: 1px solid #9ddccc;
+}
+
+.reason-list {
+    margin: 0.48rem 0 0 0;
+    padding-left: 1rem;
+}
+
+.reason-list li {
+    margin: 0.16rem 0;
+    color: var(--muted);
+    font-size: 0.88rem;
+    font-weight: 600;
+}
+
 .signal-card {
     border-radius: 14px;
     padding: 0.68rem 0.84rem;
@@ -458,13 +609,6 @@ h1, h2, h3, h4, .subhead {
     font-size: 1.2rem;
     font-weight: 800;
     color: var(--ink);
-}
-
-.discount-note {
-    margin: 0;
-    font-size: 0.92rem;
-    font-weight: 700;
-    color: var(--muted);
 }
 
 .table-wrap {
@@ -691,15 +835,28 @@ if inspection_mode == "Single Image" and uploaded is not None:
     action_text = pred["action"]
     risk_css_class = risk_level.lower()
     signal_css = pred["signal_color"].lower()
-    discount_pct = pred["discount_pct"]
+    shelf_life_text = pred["shelf_life"]
+    reason_html = "".join(f"<li>{r}</li>" for r in pred["reasons"])
     probs = pred["probs"]
+    pred_state_css = "spoiled" if is_spoilage_label(label) else "fresh"
+    state_pill_css = f"state-{pred_state_css}"
+    conf_pill_css = "conf-high" if c_level == "High confidence" else ("conf-moderate" if c_level == "Moderate confidence" else "conf-low")
+    pred_highlight_text = "High spoilage alert" if pred_state_css == "spoiled" and c_level != "Low confidence" else ("Good freshness signal" if pred_state_css == "fresh" and c_level != "Low confidence" else "Verify manually before decision")
 
     with col_right:
         st.markdown(
             f"""
-<div class="pred-card">
-  <p class="pred-title">Prediction: {label.title()}</p>
-  <p class="pred-sub">Confidence: {to_pct(conf_val)} • {c_level}</p>
+<div class="pred-card {pred_state_css}">
+    <div class="pred-meta">
+        <p class="pred-label">Prediction Result</p>
+        <div class="pred-pills">
+            <span class="pill {state_pill_css}">{label.title()}</span>
+            <span class="pill {conf_pill_css}">{c_level}</span>
+        </div>
+    </div>
+    <p class="pred-title">{label.title()}</p>
+    <p class="pred-sub">Confidence: {to_pct(conf_val)}</p>
+    <p class="pred-highlight">{pred_highlight_text}</p>
 </div>
 <div class="risk-card">
     <div class="risk-head">
@@ -708,11 +865,17 @@ if inspection_mode == "Single Image" and uploaded is not None:
     </div>
     <div class="risk-score">{risk_score}/100</div>
     <p class="risk-action">Recommended Action: {action_text}</p>
+        <span class="life-chip">Shelf-Life: {shelf_life_text}</span>
 </div>
 <div class="signal-card signal-{signal_css}">
   <p class="signal-title">Traffic Light Decision</p>
   <p class="signal-value">{pred['signal_text']}</p>
-  <p class="discount-note">Suggested Discount: {discount_pct}%</p>
+</div>
+<div class="risk-card">
+    <div class="risk-head">
+        <p class="risk-title">Why This Decision</p>
+    </div>
+    <ul class="reason-list">{reason_html}</ul>
 </div>
 """,
             unsafe_allow_html=True,
@@ -779,15 +942,17 @@ if inspection_mode == "Batch QC":
                     "confidence": to_pct(pred["conf"]),
                     "risk_score": pred["risk_score"],
                     "risk_level": pred["risk_level"],
+                    "shelf_life": pred["shelf_life"],
                     "action": pred["action"],
                     "signal": pred["signal_text"],
-                    "discount_pct": pred["discount_pct"],
                 }
             )
 
             if pred["risk_score"] > 60:
                 high_risk_count += 1
             saved_total += estimate_saved_value(pred["risk_score"], float(avg_item_value))
+
+        rows = sorted(rows, key=lambda row: int(row["risk_score"]), reverse=True)
 
         st.markdown('<div class="subhead">Batch QC Summary</div>', unsafe_allow_html=True)
         b1, b2, b3 = st.columns(3)
