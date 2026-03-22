@@ -189,14 +189,6 @@ Always report:
 6. Add a short error analysis section (false positive and false negative examples).
 7. Attach generated report file `reports/project_report.md` in final submission.
 
-## 9) What You Can Finish in 4 Hours
 
-Yes, you can deliver a strong prototype by today:
-
-1. 45 min: Dataset curation + split
-2. 75 min: Train baseline + one tuning run
-3. 30 min: Test evaluation + generate report artifacts
-4. 30 min: Streamlit demo + screenshots
-5. 30 min: Final report write-up
 
 For production-grade performance, plan additional work (more data, stronger augmentation strategy, calibration, and deployment monitoring).
