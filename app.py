@@ -38,6 +38,47 @@ def confidence_level(conf: float, threshold: float):
     return "Low confidence"
 
 
+def is_spoilage_label(label: str) -> bool:
+    text = label.strip().lower()
+    tokens = ("spoiled", "rotten", "bad", "decay")
+    return any(token in text for token in tokens)
+
+
+def compute_risk_score(label: str, conf: float) -> int:
+    # Higher confidence in spoilage should raise risk; high confidence in fresh should lower risk.
+    if is_spoilage_label(label):
+        score = 55.0 + (45.0 * conf)
+    else:
+        score = 45.0 * (1.0 - conf)
+    return int(round(min(max(score, 0.0), 100.0)))
+
+
+def risk_band(score: int) -> str:
+    if score <= 25:
+        return "Low"
+    if score <= 60:
+        return "Medium"
+    return "High"
+
+
+def action_recommendation(label: str, conf: float, c_level: str) -> str:
+    if c_level == "Low confidence":
+        return "Needs manual inspection"
+
+    if is_spoilage_label(label):
+        if conf >= 0.85:
+            return "Remove from shelf now"
+        if conf >= 0.70:
+            return "Discount for fast clearance"
+        return "Keep separate and inspect"
+
+    if conf >= 0.90:
+        return "Safe for regular sale"
+    if conf >= 0.70:
+        return "Sell soon with routine check"
+    return "Keep under observation"
+
+
 st.set_page_config(page_title="Food Spoilage Detection", page_icon="FS", layout="wide")
 
 st.markdown(
@@ -255,6 +296,72 @@ h1, h2, h3, h4, .subhead {
     font-weight: 700;
 }
 
+.risk-card {
+    background: linear-gradient(165deg, #f4fbf8 0%, #ffffff 100%);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 0.74rem 0.9rem;
+    margin-bottom: 0.5rem;
+    box-shadow: 0 8px 18px rgba(2, 47, 43, 0.08);
+}
+
+.risk-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+}
+
+.risk-title {
+    margin: 0;
+    font-size: 0.98rem;
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.risk-score {
+    font-family: 'Sora', sans-serif;
+    font-size: 1.45rem;
+    font-weight: 800;
+    color: var(--brand-deep);
+    line-height: 1;
+}
+
+.risk-band {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 0.2rem 0.55rem;
+    font-size: 0.74rem;
+    font-weight: 700;
+    border: 1px solid transparent;
+}
+
+.risk-band.low {
+    background: #ecfdf3;
+    color: #166534;
+    border-color: #86efac;
+}
+
+.risk-band.medium {
+    background: #fffbeb;
+    color: #92400e;
+    border-color: #fcd34d;
+}
+
+.risk-band.high {
+    background: #fef2f2;
+    color: #991b1b;
+    border-color: #fca5a5;
+}
+
+.risk-action {
+    margin: 0;
+    font-size: 0.92rem;
+    color: var(--muted);
+    font-weight: 700;
+}
+
 .table-wrap {
     background: var(--surface);
     border: 1px solid var(--line);
@@ -456,6 +563,10 @@ if uploaded is not None:
     label = class_names[idx.item()]
     conf_val = float(conf.item())
     c_level = confidence_level(conf_val, threshold)
+    risk_score = compute_risk_score(label, conf_val)
+    risk_level = risk_band(risk_score)
+    action_text = action_recommendation(label, conf_val, c_level)
+    risk_css_class = risk_level.lower()
 
     with col_right:
         st.markdown(
@@ -463,6 +574,14 @@ if uploaded is not None:
 <div class="pred-card">
   <p class="pred-title">Prediction: {label.title()}</p>
   <p class="pred-sub">Confidence: {to_pct(conf_val)} • {c_level}</p>
+</div>
+<div class="risk-card">
+    <div class="risk-head">
+        <p class="risk-title">Freshness Risk Score</p>
+        <span class="risk-band {risk_css_class}">{risk_level}</span>
+    </div>
+    <div class="risk-score">{risk_score}/100</div>
+    <p class="risk-action">Recommended Action: {action_text}</p>
 </div>
 """,
             unsafe_allow_html=True,
