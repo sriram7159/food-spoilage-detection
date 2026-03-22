@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import csv
+import io
 
 import streamlit as st
 import torch
@@ -63,20 +65,77 @@ def risk_band(score: int) -> str:
 
 def action_recommendation(label: str, conf: float, c_level: str) -> str:
     if c_level == "Low confidence":
-        return "Needs manual inspection"
+        return "Manual check needed"
 
     if is_spoilage_label(label):
         if conf >= 0.85:
-            return "Remove from shelf now"
+            return "Throw it now"
         if conf >= 0.70:
-            return "Discount for fast clearance"
-        return "Keep separate and inspect"
+            return "Use today or throw soon"
+        return "Eat fast (after manual check)"
 
     if conf >= 0.90:
-        return "Safe for regular sale"
+        return "Safe to eat"
     if conf >= 0.70:
-        return "Sell soon with routine check"
-    return "Keep under observation"
+        return "Eat fast"
+    return "Eat today (check quality)"
+
+
+def traffic_signal(score: int, c_level: str) -> tuple[str, str]:
+    if c_level == "Low confidence":
+        return "Amber", "Manual Check"
+    if score <= 25:
+        return "Green", "Safe"
+    if score <= 60:
+        return "Amber", "Eat Fast"
+    return "Red", "Throw"
+
+
+def discount_suggestion(score: int, c_level: str) -> int:
+    if c_level == "Low confidence":
+        return 0
+    if score <= 25:
+        return 0
+    if score <= 60:
+        return 15
+    return 40
+
+
+def estimate_saved_value(score: int, avg_item_value: float) -> float:
+    if score > 60:
+        return avg_item_value * 0.70
+    if score > 25:
+        return avg_item_value * 0.25
+    return 0.0
+
+
+def predict_image(image: Image.Image, model, preprocess, device, class_names: list[str], threshold: float):
+    x = preprocess(image).unsqueeze(0).to(device)
+    with torch.no_grad():
+        probs = F.softmax(model(x), dim=1).squeeze(0)
+
+    conf, idx = torch.max(probs, dim=0)
+    label = class_names[idx.item()]
+    conf_val = float(conf.item())
+    c_level = confidence_level(conf_val, threshold)
+    risk_score = compute_risk_score(label, conf_val)
+    risk_level = risk_band(risk_score)
+    action_text = action_recommendation(label, conf_val, c_level)
+    signal_color, signal_text = traffic_signal(risk_score, c_level)
+    discount_pct = discount_suggestion(risk_score, c_level)
+
+    return {
+        "label": label,
+        "conf": conf_val,
+        "confidence_level": c_level,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "action": action_text,
+        "signal_color": signal_color,
+        "signal_text": signal_text,
+        "discount_pct": discount_pct,
+        "probs": probs,
+    }
 
 
 st.set_page_config(page_title="Food Spoilage Detection", page_icon="FS", layout="wide")
@@ -362,6 +421,52 @@ h1, h2, h3, h4, .subhead {
     font-weight: 700;
 }
 
+.signal-card {
+    border-radius: 14px;
+    padding: 0.68rem 0.84rem;
+    border: 1px solid var(--line);
+    margin-bottom: 0.45rem;
+    box-shadow: 0 7px 16px rgba(7, 48, 44, 0.08);
+}
+
+.signal-green {
+    background: linear-gradient(160deg, #ecfdf3 0%, #f7fffb 100%);
+    border-color: #86efac;
+}
+
+.signal-amber {
+    background: linear-gradient(160deg, #fffbeb 0%, #fffdf4 100%);
+    border-color: #fcd34d;
+}
+
+.signal-red {
+    background: linear-gradient(160deg, #fef2f2 0%, #fff9f9 100%);
+    border-color: #fca5a5;
+}
+
+.signal-title {
+    margin: 0;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.signal-value {
+    margin: 0.2rem 0 0 0;
+    font-size: 1.2rem;
+    font-weight: 800;
+    color: var(--ink);
+}
+
+.discount-note {
+    margin: 0;
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: var(--muted);
+}
+
 .table-wrap {
     background: var(--surface);
     border: 1px solid var(--line);
@@ -473,6 +578,8 @@ with st.sidebar:
     report_json = st.text_input("Evaluation report path", value="reports/evaluation_report.json")
     train_summary_json = st.text_input("Training summary path", value="reports/training_summary.json")
     threshold = st.slider("Confidence threshold", min_value=0.50, max_value=0.99, value=0.70, step=0.01)
+    inspection_mode = st.radio("Inspection mode", ["Single Image", "Batch QC"], horizontal=True)
+    avg_item_value = st.number_input("Avg item value (local currency)", min_value=1.0, value=20.0, step=1.0)
     st.caption("Higher threshold means stricter acceptance of predictions.")
 
 if not Path(checkpoint).exists():
@@ -482,6 +589,17 @@ if not Path(checkpoint).exists():
 model, class_names, preprocess, device = load_model(checkpoint)
 report_data = load_json(Path(report_json))
 train_summary = load_json(Path(train_summary_json))
+
+if "qc_items_scanned" not in st.session_state:
+    st.session_state.qc_items_scanned = 0
+if "qc_high_risk_items" not in st.session_state:
+    st.session_state.qc_high_risk_items = 0
+if "qc_saved_value" not in st.session_state:
+    st.session_state.qc_saved_value = 0.0
+if "last_single_token" not in st.session_state:
+    st.session_state.last_single_token = None
+if "last_batch_token" not in st.session_state:
+    st.session_state.last_batch_token = None
 
 st.markdown(
         f"""
@@ -495,6 +613,14 @@ st.markdown(
 )
 
 st.markdown('<div class="subhead">Model Performance Snapshot</div>', unsafe_allow_html=True)
+
+imp1, imp2, imp3 = st.columns(3)
+with imp1:
+    st.metric("Items Scanned", f"{st.session_state.qc_items_scanned}")
+with imp2:
+    st.metric("High-Risk Flags", f"{st.session_state.qc_high_risk_items}")
+with imp3:
+    st.metric("Est. Value Saved", f"{st.session_state.qc_saved_value:.2f}")
 
 if report_data and "metrics" in report_data:
     m = report_data["metrics"]
@@ -543,10 +669,11 @@ if report_data and "metrics" in report_data:
 else:
     pass
 
-st.info("Upload an image by clicking Browse files in the box below, or drag and drop a file.")
-uploaded = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "webp", "bmp"])
+if inspection_mode == "Single Image":
+    st.info("Upload an image by clicking Browse files in the box below, or drag and drop a file.")
+    uploaded = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "webp", "bmp"], key="single_upload")
 
-if uploaded is not None:
+if inspection_mode == "Single Image" and uploaded is not None:
     col_left, col_right = st.columns([1.05, 1.0])
     image = Image.open(uploaded).convert("RGB")
 
@@ -555,18 +682,17 @@ if uploaded is not None:
         st.image(image, caption="Input image", width="stretch")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    x = preprocess(image).unsqueeze(0).to(device)
-    with torch.no_grad():
-        probs = F.softmax(model(x), dim=1).squeeze(0)
-
-    conf, idx = torch.max(probs, dim=0)
-    label = class_names[idx.item()]
-    conf_val = float(conf.item())
-    c_level = confidence_level(conf_val, threshold)
-    risk_score = compute_risk_score(label, conf_val)
-    risk_level = risk_band(risk_score)
-    action_text = action_recommendation(label, conf_val, c_level)
+    pred = predict_image(image, model, preprocess, device, class_names, threshold)
+    label = pred["label"]
+    conf_val = pred["conf"]
+    c_level = pred["confidence_level"]
+    risk_score = pred["risk_score"]
+    risk_level = pred["risk_level"]
+    action_text = pred["action"]
     risk_css_class = risk_level.lower()
+    signal_css = pred["signal_color"].lower()
+    discount_pct = pred["discount_pct"]
+    probs = pred["probs"]
 
     with col_right:
         st.markdown(
@@ -582,6 +708,11 @@ if uploaded is not None:
     </div>
     <div class="risk-score">{risk_score}/100</div>
     <p class="risk-action">Recommended Action: {action_text}</p>
+</div>
+<div class="signal-card signal-{signal_css}">
+  <p class="signal-title">Traffic Light Decision</p>
+  <p class="signal-value">{pred['signal_text']}</p>
+  <p class="discount-note">Suggested Discount: {discount_pct}%</p>
 </div>
 """,
             unsafe_allow_html=True,
@@ -614,3 +745,76 @@ if uploaded is not None:
             st.progress(min(max(float(p), 0.0), 1.0))
 
         st.caption("Adjust threshold in sidebar to trade confidence strictness vs prediction coverage.")
+
+    single_token = (uploaded.name, getattr(uploaded, "size", None))
+    if single_token != st.session_state.last_single_token:
+        st.session_state.qc_items_scanned += 1
+        if risk_score > 60:
+            st.session_state.qc_high_risk_items += 1
+        st.session_state.qc_saved_value += estimate_saved_value(risk_score, float(avg_item_value))
+        st.session_state.last_single_token = single_token
+
+if inspection_mode == "Batch QC":
+    st.info("Upload multiple images for quality control and export the inspection sheet.")
+    uploaded_files = st.file_uploader(
+        "Upload batch images",
+        type=["jpg", "jpeg", "png", "webp", "bmp"],
+        accept_multiple_files=True,
+        key="batch_upload",
+    )
+
+    if uploaded_files:
+        rows = []
+        high_risk_count = 0
+        saved_total = 0.0
+
+        for file in uploaded_files:
+            image = Image.open(file).convert("RGB")
+            pred = predict_image(image, model, preprocess, device, class_names, threshold)
+
+            rows.append(
+                {
+                    "file": file.name,
+                    "prediction": pred["label"],
+                    "confidence": to_pct(pred["conf"]),
+                    "risk_score": pred["risk_score"],
+                    "risk_level": pred["risk_level"],
+                    "action": pred["action"],
+                    "signal": pred["signal_text"],
+                    "discount_pct": pred["discount_pct"],
+                }
+            )
+
+            if pred["risk_score"] > 60:
+                high_risk_count += 1
+            saved_total += estimate_saved_value(pred["risk_score"], float(avg_item_value))
+
+        st.markdown('<div class="subhead">Batch QC Summary</div>', unsafe_allow_html=True)
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            st.metric("Batch Items", f"{len(rows)}")
+        with b2:
+            st.metric("High-Risk in Batch", f"{high_risk_count}")
+        with b3:
+            st.metric("Batch Est. Saved", f"{saved_total:.2f}")
+
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        csv_buffer = io.StringIO()
+        writer = csv.DictWriter(csv_buffer, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+        st.download_button(
+            "Download Batch Report (CSV)",
+            data=csv_buffer.getvalue(),
+            file_name="batch_qc_report.csv",
+            mime="text/csv",
+        )
+
+        batch_token = tuple((f.name, getattr(f, "size", None)) for f in uploaded_files)
+        if batch_token != st.session_state.last_batch_token:
+            st.session_state.qc_items_scanned += len(rows)
+            st.session_state.qc_high_risk_items += high_risk_count
+            st.session_state.qc_saved_value += saved_total
+            st.session_state.last_batch_token = batch_token
